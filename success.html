@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Successful - FRANCIS'S FASTLINK</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .container {
+            background: #ffffff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            max-width: 400px;
+            width: 100%;
+        }
+        h2 {
+            color: #28a745;
+            margin-bottom: 15px;
+        }
+        p {
+            color: #555;
+            font-size: 15px;
+            line-height: 1.5;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #28a745;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container" id="content">
+        <div class="loader" id="loader"></div>
+        <h2 id="title">Verifying Payment...</h2>
+        <p id="message">Please wait while we confirm your payment and trigger your data bundle delivery.</p>
+    </div>
+
+    <script>
+        async function verifyTransaction() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const reference = urlParams.get('reference') || urlParams.get('trxref');
+
+            if (!reference) {
+                document.getElementById('loader').style.display = 'none';
+                document.getElementById('title').innerText = "Reference Missing";
+                document.getElementById('message').innerText = "No transaction reference was found in the URL.";
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/verify-payment/${reference}`);
+                const result = await response.json();
+
+                document.getElementById('loader').style.display = 'none';
+                if (response.ok && result.status === "success") {
+                    document.getElementById('title').innerText = "Payment Successful!";
+                    document.getElementById('message').innerText = "Your payment was verified successfully! Your payment confirmation and data delivery SMS have been queued.";
+                } else {
+                    document.getElementById('title').innerText = "Verification Failed";
+                    document.getElementById('message').innerText = result.detail || "Could not verify transaction.";
+                }
+            } catch (err) {
+                console.error("Error:", err);
+                document.getElementById('loader').style.display = 'none';
+                document.getElementById('title').innerText = "Connection Error";
+                document.getElementById('message').innerText = "Could not connect to the server to verify payment.";
+            }
+        }
+
+        window.onload = verifyTransaction;
+    </script>
+</body>
+</html>

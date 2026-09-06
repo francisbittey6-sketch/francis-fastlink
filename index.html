@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FRANCIS'S FASTLINK - Portal</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.96);
+            backdrop-filter: blur(10px);
+            padding: 35px;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            max-width: 420px;
+            box-sizing: border-box;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .brand-header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        h2 {
+            color: #2d3748;
+            margin: 0;
+            font-size: 22px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .subtitle {
+            color: #718096;
+            font-size: 13px;
+            margin-top: 5px;
+            font-weight: 500;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .tab {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            color: #718096;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
+        .tab.active {
+            color: #667eea;
+            border-bottom: 2px solid #667eea;
+            margin-bottom: -2px;
+        }
+        .form-section {
+            display: none;
+        }
+        .form-section.active {
+            display: block;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            color: #4a5568;
+            font-weight: 600;
+            font-size: 13px;
+        }
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+            background-color: #f8fafc;
+            transition: all 0.3s ease;
+        }
+        input:focus, select:focus {
+            border-color: #667eea;
+            background-color: #fff;
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button.success-btn {
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            box-shadow: 0 4px 12px rgba(72, 187, 120, 0.3);
+        }
+        button:hover {
+            transform: translateY(-1px);
+        }
+        .user-welcome {
+            background: #edf2f7;
+            padding: 8px 12px;
+            border-radius: 6px;
+            text-align: center;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 15px;
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logout-btn {
+            background: none;
+            border: none;
+            color: #e53e3e;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 0;
+            margin: 0;
+            box-shadow: none;
+        }
+        .logout-btn:hover {
+            transform: none;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="brand-header">
+            <h2>FRANCIS'S FASTLINK</h2>
+            <div class="subtitle">Instant Data Distribution Hub</div>
+        </div>
+
+        <!-- NAVIGATION TABS (Buy Data is default & optional) -->
+        <div class="tabs" id="authTabs">
+            <div class="tab active" onclick="switchTab('buy')">Buy Data</div>
+            <div class="tab" onclick="switchTab('login')">Login</div>
+            <div class="tab" onclick="switchTab('register')">Register</div>
+        </div>
+
+        <!-- BUY DATA SECTION (Default / Guest Mode) -->
+        <div id="buySection" class="form-section active">
+            <div id="userWelcomeBanner" class="user-welcome" style="display: none;">
+                <span id="welcomeUserText">Welcome!</span>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+            
+            <form id="paymentForm" onsubmit="handlePayment(event)">
+                <div class="form-group">
+                    <label>Recipient Phone Number</label>
+                    <input type="text" id="phone" placeholder="e.g. 0551234987" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Network Provider</label>
+                    <select id="network" required>
+                        <option value="MTN">MTN</option>
+                        <option value="Telecel">Telecel</option>
+                        <option value="AT">AT</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Select Data Bundle & Price</label>
+                    <select id="bundle" onchange="updateAmount()" required>
+                        <option value="1GB" data-price="5">1GB - GHS 5</option>
+                        <option value="2GB" data-price="10">2GB - GHS 10</option>
+                        <option value="5GB" data-price="25">5GB - GHS 25</option>
+                        <option value="10GB" data-price="50">10GB - GHS 50</option>
+                    </select>
+                </div>
+
+                <input type="hidden" id="amount" value="5">
+
+                <button type="submit" class="success-btn" id="submitBtn">Proceed to Payment</button>
+            </form>
+        </div>
+
+        <!-- LOGIN SECTION -->
+        <div id="loginSection" class="form-section">
+            <form onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <label>Phone Number</label>
+                    <input type="text" id="loginPhone" placeholder="e.g. 0551234987" required>
+                </div>
+                <div class="form-group">
+                    <label>Account PIN</label>
+                    <input type="password" id="loginPin" placeholder="4-digit PIN" maxlength="4" required>
+                </div>
+                <button type="submit">Login to Account</button>
+            </form>
+        </div>
+
+        <!-- REGISTER SECTION -->
+        <div id="registerSection" class="form-section">
+            <form onsubmit="handleRegister(event)">
+                <div class="form-group">
+                    <label>Full Name</label>
+                    <input type="text" id="regName" placeholder="Francis Bittey-Biantey" required>
+                </div>
+                <div class="form-group">
+                    <label>Phone Number</label>
+                    <input type="text" id="regPhone" placeholder="e.g. 0551234987" required>
+                </div>
+                <div class="form-group">
+                    <label>Create 4-digit PIN</label>
+                    <input type="password" id="regPin" placeholder="4-digit PIN" maxlength="4" required>
+                </div>
+                <button type="submit">Create Account</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.form-section').forEach(s => s.classList.remove('active'));
+
+            if (tabName === 'buy') {
+                document.querySelectorAll('.tab')[0].classList.add('active');
+                document.getElementById('buySection').classList.add('active');
+            } else if (tabName === 'login') {
+                document.querySelectorAll('.tab')[1].classList.add('active');
+                document.getElementById('loginSection').classList.add('active');
+            } else if (tabName === 'register') {
+                document.querySelectorAll('.tab')[2].classList.add('active');
+                document.getElementById('registerSection').classList.add('active');
+            }
+        }
+
+        async function handleRegister(event) {
+            event.preventDefault();
+            const payload = {
+                full_name: document.getElementById('regName').value,
+                phone_number: document.getElementById('regPhone').value,
+                pin: document.getElementById('regPin').value
+            };
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await res.json();
+                if (res.ok) {
+                    alert("Account created successfully! Please login.");
+                    switchTab('login');
+                } else {
+                    alert(result.detail || "Registration failed.");
+                }
+            } catch (err) {
+                alert("Server connection error.");
+            }
+        }
+
+        async function handleLogin(event) {
+            event.preventDefault();
+            const payload = {
+                phone_number: document.getElementById('loginPhone').value,
+                pin: document.getElementById('loginPin').value
+            };
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await res.json();
+                if (res.ok) {
+                    document.getElementById('welcomeUserText').innerText = `Hello, ${result.full_name}`;
+                    document.getElementById('userWelcomeBanner').style.display = 'flex';
+                    document.getElementById('phone').value = payload.phone_number;
+                    
+                    switchTab('buy');
+                } else {
+                    alert(result.detail || "Login failed.");
+                }
+            } catch (err) {
+                alert("Server connection error.");
+            }
+        }
+
+        function logout() {
+            document.getElementById('userWelcomeBanner').style.display = 'none';
+            document.getElementById('phone').value = '';
+            switchTab('buy');
+        }
+
+        function updateAmount() {
+            const bundleSelect = document.getElementById('bundle');
+            const selectedOption = bundleSelect.options[bundleSelect.selectedIndex];
+            document.getElementById('amount').value = selectedOption.getAttribute('data-price');
+        }
+
+        async function handlePayment(event) {
+            event.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            btn.innerText = "Initializing Secure Pay...";
+            btn.disabled = true;
+
+            const payload = {
+                phone_number: document.getElementById('phone').value,
+                network: document.getElementById('network').value,
+                bundle_size: document.getElementById('bundle').value,
+                amount: parseFloat(document.getElementById('amount').value)
+            };
+
+            try {
+                const response = await fetch('/api/initialize-payment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.status && result.data && result.data.authorization_url) {
+                    window.location.href = result.data.authorization_url;
+                } else {
+                    alert(result.detail || "Payment initialization failed.");
+                    btn.innerText = "Proceed to Payment";
+                    btn.disabled = false;
+                }
+            } catch (err) {
+                alert("An error occurred connecting to the server.");
+                btn.innerText = "Proceed to Payment";
+                btn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
