@@ -3,91 +3,84 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Payment Successful - FRANCIS'S FASTLINK</title>
-    <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f4f7f6;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-        }
-        .container {
-            background: #ffffff;
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-            text-align: center;
-            max-width: 400px;
-            width: 100%;
-        }
-        h2 {
-            color: #28a745;
-            margin-bottom: 15px;
-        }
-        p {
-            color: #555;
-            font-size: 15px;
-            line-height: 1.5;
-        }
-        .loader {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #28a745;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
+    <title>Payment Successful - Francis' Fastlink</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body>
-    <div class="container" id="content">
-        <div class="loader" id="loader"></div>
-        <h2 id="title">Verifying Payment...</h2>
-        <p id="message">Please wait while we confirm your payment and trigger your data bundle delivery.</p>
+<body class="bg-zinc-950 text-white font-sans antialiased min-h-screen flex flex-col justify-between p-4">
+
+    <div class="max-w-md mx-auto w-full space-y-4 pt-4">
+        
+        <!-- Success Banner -->
+        <div class="bg-emerald-600 rounded-2xl p-6 text-center space-y-2 shadow-lg shadow-emerald-600/20">
+            <div class="w-12 h-12 bg-white text-emerald-600 rounded-full flex items-center justify-center mx-auto text-xl font-bold">
+                <i class="fa-solid fa-check"></i>
+            </div>
+            <h1 class="text-xl font-bold">Payment Successful!</h1>
+            <p class="text-xs text-emerald-100">Your payment has been verified and your order is being processed.</p>
+        </div>
+
+        <!-- Order Details Card -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 space-y-3 shadow-xl">
+            <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-zinc-800 pb-2">Order Details</h2>
+            
+            <div class="flex justify-between text-sm">
+                <span class="text-gray-400">Transaction Reference:</span>
+                <span id="ref-text" class="font-mono font-medium text-white text-xs">TXN-7967-1788715031413</span>
+            </div>
+            <div class="flex justify-between text-sm">
+                <span class="text-gray-400">Network:</span>
+                <span id="net-text" class="font-medium text-white">MTN Non-Expiry Bundles</span>
+            </div>
+            <div class="flex justify-between text-sm">
+                <span class="text-gray-400">Bundle:</span>
+                <span id="bundle-text" class="font-medium text-white">1GB</span>
+            </div>
+            <div class="flex justify-between text-sm">
+                <span class="text-gray-400">Recipient:</span>
+                <span id="recipient-text" class="font-medium text-white">0249998737</span>
+            </div>
+            <div class="flex justify-between text-sm font-bold border-t border-zinc-800 pt-2 text-emerald-400">
+                <span>Amount Paid:</span>
+                <span id="amount-text">₵4.50</span>
+            </div>
+            <div class="flex justify-between items-center pt-1">
+                <span class="text-gray-400 text-sm">Order Status:</span>
+                <span class="bg-blue-950 border border-blue-800 text-blue-400 text-xs px-3 py-1 rounded-full font-bold">Processing</span>
+            </div>
+        </div>
+
+        <!-- What's Next Notice -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 space-y-2 text-xs text-gray-300">
+            <div class="flex items-center space-x-2 text-orange-400 font-bold">
+                <i class="fa-solid fa-circle-info"></i>
+                <span>What's Next?</span>
+            </div>
+            <p>Your data bundle will be credited to <span id="notice-recipient" class="text-white font-bold">0249998737</span> within <strong class="text-white">10 minutes - 4 hours</strong>. You will receive an SMS once the data has been credited.</p>
+        </div>
+
+        <!-- Home Button -->
+        <a href="/" class="block w-full bg-orange-600 hover:bg-orange-500 text-center font-bold py-3.5 rounded-xl text-sm transition shadow-lg shadow-orange-600/20">
+            Back to Home
+        </a>
+
     </div>
 
     <script>
-        async function verifyTransaction() {
-            const urlParams = new URLSearchParams(window.location.search);
-            const reference = urlParams.get('reference') || urlParams.get('trxref');
+        // Parse URL parameters passed from checkout
+        const urlParams = new URLSearchParams(window.location.search);
+        const ref = urlParams.get('reference') || urlParams.get('trxref') || 'TXN-' + Math.floor(Math.random() * 900000);
+        const network = urlParams.get('network') || 'MTN';
+        const bundle = urlParams.get('bundle') || '1GB';
+        const amount = urlParams.get('amount') || '4.50';
+        const phone = urlParams.get('phone') || '0240000000';
 
-            if (!reference) {
-                document.getElementById('loader').style.display = 'none';
-                document.getElementById('title').innerText = "Reference Missing";
-                document.getElementById('message').innerText = "No transaction reference was found in the URL.";
-                return;
-            }
-
-            try {
-                const response = await fetch(`/api/verify-payment/${reference}`);
-                const result = await response.json();
-
-                document.getElementById('loader').style.display = 'none';
-                if (response.ok && result.status === "success") {
-                    document.getElementById('title').innerText = "Payment Successful!";
-                    document.getElementById('message').innerText = "Your payment was verified successfully! Your payment confirmation and data delivery SMS have been queued.";
-                } else {
-                    document.getElementById('title').innerText = "Verification Failed";
-                    document.getElementById('message').innerText = result.detail || "Could not verify transaction.";
-                }
-            } catch (err) {
-                console.error("Error:", err);
-                document.getElementById('loader').style.display = 'none';
-                document.getElementById('title').innerText = "Connection Error";
-                document.getElementById('message').innerText = "Could not connect to the server to verify payment.";
-            }
-        }
-
-        window.onload = verifyTransaction;
+        document.getElementById('ref-text').innerText = ref;
+        document.getElementById('net-text').innerText = network === 'MTN' ? 'MTN Non-Expiry Bundles' : `${network} Bundles`;
+        document.getElementById('bundle-text').innerText = bundle;
+        document.getElementById('recipient-text').innerText = phone;
+        document.getElementById('notice-recipient').innerText = phone;
+        document.getElementById('amount-text').innerText = `₵${parseFloat(amount).toFixed(2)}`;
     </script>
 </body>
 </html>

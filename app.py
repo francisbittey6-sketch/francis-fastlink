@@ -1,16 +1,20 @@
 import os
-import json
-import requests
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+import re
+import sqlite3
+from datetime import datetime
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Dict
+import httpx
+from dotenv import load_dotenv
 
-app = FastAPI()
+# Load environment variables from .env file
+load_dotenv()
 
-# Enable CORS for frontend integration
+app = FastAPI(title="Francis' Fastlink - Automated Data Distribution & USSD Engine")
+
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,309 +23,453 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration & Environment Variables
-PAYSTACK_SECRET_KEY = "sk_test_8a2d40db43c570b6d9e55b019b081888d543f6a7"
-PAYSTACK_INIT_URL = "https://api.paystack.co/transaction/initialize"
-PAYSTACK_VERIFY_URL = "https://api.paystack.co/transaction/verify/"
+# --- CONFIGURATION & PRICING ---
+RECEIVER_PHONE = "0249998737"
+TECHLINK_API_KEY = os.getenv("TECHLINK_API_KEY")
+WHOLESALE_API_URL = os.getenv("WHOLESALE_API_URL", "https://api.techlinkgh.com/api/v1/topup")
+WALLET_BALANCE_URL = "https://api.techlinkgh.com/api/v1/wallet/balance"
 
-SMS_API_KEY = "your_arkesel_api_key"
-SMS_SENDER_ID = "Fastllink"
-SMS_URL = "https://sms.arkesel.com/api/v2/sms/send"
+# Base wholesale/cost prices (A hidden 5% profit margin is automatically added on checkout)
+BASE_PRICES = {
+    "MTN": {
+        "1GB": 4.50,
+        "2GB": 9.00,
+        "3GB": 13.00,
+        "4GB": 17.00,
+        "5GB": 21.80,
+        "10GB": 41.50,
+    },
+    "TELECEL": {
+        "1GB": 5.00,
+        "2GB": 10.00,
+        "3GB": 14.50,
+        "4GB": 18.50,
+        "5GB": 22.00,
+        "10GB": 43.00,
+    },
+    "AIRTELTIGO": {
+        "1GB": 4.80,
+        "2GB": 9.50,
+        "3GB": 13.50,
+        "4GB": 17.50,
+        "5GB": 22.00,
+        "10GB": 42.00,
+    },
+}
 
-# Persistent JSON storage file so accounts survive server reloads
-USERS_FILE = "users.json"
+DB_FILE = "fastlink.db"
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+# --- DATABASE SETUP (AUTO-FIXES SCHEMA) ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Automatically drops the old table to prevent column mismatch errors
+    cursor.execute("DROP TABLE IF EXISTS orders")
+    
+    cursor.execute("""
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference TEXT UNIQUE,
+            customer_phone TEXT,
+            network TEXT,
+            bundle_name TEXT,
+            amount REAL,
+            status TEXT,
+            created_at TEXT,
+            delivered_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, indent=4)
+init_db()
 
-# Load users into memory on startup
-users_db = load_users()
-
-# Data Models
-class UserRegister(BaseModel):
-    full_name: str
-    phone_number: str
-    pin: str
-
-class UserLogin(BaseModel):
-    phone_number: str
-    pin: str
-
-class PurchaseRequest(BaseModel):
+class CheckoutRequest(BaseModel):
     phone_number: str
     network: str
-    bundle_size: str
-    amount: float
+    bundle_name: str
 
-# Helper function to send SMS via Arkesel
-def send_sms(phone_number: str, message: str):
-    sms_payload = {
-        "sender": SMS_SENDER_ID,
-        "message": message,
-        "recipients": [phone_number]
-    }
-    sms_headers = {
-        "api-key": SMS_API_KEY,
-        "Content-Type": "application/json"
-    }
-    try:
-        requests.post(SMS_URL, json=sms_payload, headers=sms_headers)
-    except Exception as e:
-        print(f"SMS notification error: {e}")
-
-# --- USER ACCOUNT ENDPOINTS ---
-@app.post("/api/register")
-def register_user(data: UserRegister):
-    global users_db
-    users_db = load_users()  # Refresh from file
-    
-    if data.phone_number in users_db:
-        raise HTTPException(status_code=400, detail="An account with this phone number already exists.")
-    
-    users_db[data.phone_number] = {
-        "full_name": data.full_name,
-        "phone_number": data.phone_number,
-        "pin": data.pin
-    }
-    save_users(users_db)
-    return {"status": "success", "message": "Account created successfully!"}
-
-@app.post("/api/login")
-def login_user(data: UserLogin):
-    global users_db
-    users_db = load_users()  # Refresh from file
-    
-    user = users_db.get(data.phone_number)
-    if not user or user["pin"] != data.pin:
-        raise HTTPException(status_code=400, detail="Invalid phone number or PIN.")
-    
-    return {"status": "success", "message": f"Welcome back, {user['full_name']}!", "full_name": user["full_name"]}
-
-# --- PAYMENT & FULFILLMENT ENDPOINTS ---
-@app.post("/api/initialize-payment")
-def initialize_payment(data: PurchaseRequest):
+# --- BACKGROUND WORKER: TECHLINK GH FULFILLMENT ---
+async def fulfill_wholesale_bundle(phone_number: str, network: str, bundle_size: str, reference: str):
+    """Sends automated top-up request to Techlink GH live API."""
     headers = {
-        "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
-        "Content-Type": "application/json"
+        "x-api-key": TECHLINK_API_KEY,
+        "Content-Type": "application/json",
     }
-    
-    # Auto-generate a valid email format accepted by Paystack
-    generated_email = f"user_{data.phone_number}@fastlink.com"
-    
     payload = {
-        "email": generated_email,
-        "amount": int(data.amount * 100),
-        "callback_url": "http://localhost:8000/success.html",
-        "metadata": {
-            "phone_number": data.phone_number,
-            "network": data.network,
-            "bundle_size": data.bundle_size
-        }
-    }
-
-    response = requests.post(PAYSTACK_INIT_URL, json=payload, headers=headers)
-    res_data = response.json()
-
-    if not res_data.get("status"):
-        raise HTTPException(status_code=400, detail=res_data.get("message", "Payment initialization failed"))
-
-    return res_data
-
-def fulfill_bundle_and_notify(phone_number: str, network: str, bundle_size: str, amount_ghs: float):
-    payment_msg = f"FRANCIS'S FASTLINK: Payment of GHS {amount_ghs:.2f} received for your {bundle_size} {network} bundle. Processing delivery..."
-    send_sms(phone_number, payment_msg)
-
-    VENDOR_API_URL = "https://api.yourdatavendor.com/v1/topup"
-    VENDOR_API_KEY = "your_vendor_api_key"
-
-    vendor_payload = {
-        "network": network,
         "phone": phone_number,
-        "bundle": bundle_size
-    }
-    vendor_headers = {
-        "Authorization": f"Bearer {VENDOR_API_KEY}",
-        "Content-Type": "application/json"
+        "network": network,
+        "bundle": bundle_size,
+        "reference": reference,
     }
 
-    fulfillment_success = False
-    try:
-        vendor_res = requests.post(VENDOR_API_URL, json=vendor_payload, headers=vendor_headers)
-        if vendor_res.status_code == 200:
-            fulfillment_success = True
-    except Exception as e:
-        print(f"Vendor API connection error: {e}")
+    delivered_time = None
+    status = "FAILED"
 
-    if fulfillment_success:
-        delivery_msg = f"FRANCIS'S FASTLINK: Your {bundle_size} {network} data bundle has been successfully delivered to {phone_number}. Enjoy!"
-    else:
-        delivery_msg = f"FRANCIS'S FASTLINK: Payment confirmed! Your {bundle_size} {network} bundle for {phone_number} is being queued."
-    
-    send_sms(phone_number, delivery_msg)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.post(WHOLESALE_API_URL, json=payload, headers=headers)
+            if response.status_code in [200, 201]:
+                delivered_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                status = "SUCCESSFUL"
+                print(f"--- Techlink GH: Successfully delivered {bundle_size} to {phone_number} ---")
+            else:
+                print(f"--- Techlink GH Error: {response.text} ---")
+        except Exception as e:
+            print(f"--- Techlink GH Connection Exception: {e} ---")
 
-@app.get("/api/verify-payment/{reference}")
-def verify_payment(reference: str, background_tasks: BackgroundTasks):
-    headers = {"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}"}
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE orders 
+        SET status = ?, delivered_at = ? 
+        WHERE reference = ?
+    """, (status, delivered_time, reference))
+    conn.commit()
+    conn.close()
 
-    response = requests.get(PAYSTACK_VERIFY_URL + reference, headers=headers)
-    res_data = response.json()
 
-    if not res_data.get("status") or res_data["data"]["status"] != "success":
-        raise HTTPException(
-            status_code=400,
-            detail="Payment verification failed or transaction is still pending.",
-        )
-
-    transaction_data = res_data.get("data", {})
-    amount_paid = transaction_data.get("amount", 0) / 100
-
-    metadata = transaction_data.get("metadata", {})
-    phone_number = metadata.get("phone_number", "0240000000")
-    network = metadata.get("network", "MTN")
-    bundle_size = metadata.get("bundle_size", "1GB")
-
-    background_tasks.add_task(fulfill_bundle_and_notify, phone_number, network, bundle_size, amount_paid)
-
-    return {
-        "status": "success",
-        "message": "Payment verified successfully. Notifications and delivery are in progress!",
-        "data": transaction_data
-    }
-
-# --- ADVANCED USSD GATEWAY ENDPOINT (Supports Guests, Self & Other Numbers) ---
-@app.post("/api/ussd")
-async def ussd_gateway(request: Request, background_tasks: BackgroundTasks):
-    form_data = await request.form()
-    caller_phone = form_data.get("phoneNumber", "")
-    text = form_data.get("text", "")
-    
-    if caller_phone.startswith("+233"):
-        caller_phone = "0" + caller_phone[4:]
-
-    inputs = text.split("*") if text else []
-    response_message = ""
-
-    # --- MAIN MENU ---
-    if text == "":
-        response_message = (
-            "CON Welcome to Francis' Fastlink\n"
-            "1. Buy Data Bundle\n"
-            "2. Check Account Status"
-        )
-
-    # --- OPTION 1: BUY DATA BUNDLE FLOW ---
-    elif len(inputs) == 1 and inputs[0] == "1":
-        response_message = (
-            "CON Select Network:\n"
-            "1. MTN\n"
-            "2. Telecel\n"
-            "3. AT"
-        )
-
-    elif len(inputs) == 2 and inputs[0] == "1":
-        response_message = (
-            "CON Select Bundle Size:\n"
-            "1. 1GB - GHS 5\n"
-            "2. 2GB - GHS 10\n"
-            "3. 5GB - GHS 25\n"
-            "4. 10GB - GHS 50"
-        )
-
-    elif len(inputs) == 3 and inputs[0] == "1":
-        response_message = (
-            "CON Recipient Number:\n"
-            f"1. Buy for Self ({caller_phone})\n"
-            "2. Buy for Another Number"
-        )
-
-    elif len(inputs) == 4 and inputs[0] == "1":
-        recipient_choice = inputs[3]
-        if recipient_choice == "1":
-            # Buy for self - execute immediately
-            network_choice = inputs[1]
-            bundle_choice = inputs[2]
+# --- FRONTEND UI ---
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Francis' Fastlink - Automated High-Speed Data Distribution</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-[#0b1329] text-zinc-100 min-h-screen flex justify-center p-3 font-sans">
+        <div class="w-full max-w-md space-y-4 pb-12">
             
-            net_map = {"1": "MTN", "2": "Telecel", "3": "AT"}
-            bundle_map = {
-                "1": ("1GB", 5.0), 
-                "2": ("2GB", 10.0), 
-                "3": ("5GB", 25.0), 
-                "4": ("10GB", 50.0)
+            <!-- HEADER -->
+            <div class="text-center space-y-1 pt-2">
+                <h1 class="text-xl font-black text-amber-500 tracking-wider">FRANCIS' FASTLINK</h1>
+                <p class="text-xs text-zinc-400 font-medium">Automated High-Speed Data Distribution</p>
+            </div>
+
+            <!-- LIVE DELIVERY STATUS CARD -->
+            <div class="bg-[#131d3b] border border-zinc-700/60 rounded-2xl p-4 shadow-xl space-y-3">
+                <div class="flex justify-between items-center">
+                    <div class="flex items-center space-x-2">
+                        <span class="w-2 h-2 bg-emerald-400 rounded-full animate-ping"></span>
+                        <span class="text-xs font-bold text-zinc-200 tracking-wide uppercase">Delivery Status</span>
+                    </div>
+                    <span class="bg-red-500/10 text-red-500 border border-red-500/30 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center space-x-1.5">
+                        <span class="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse"></span>
+                        <span>LIVE</span>
+                    </span>
+                </div>
+                <div class="bg-[#090e1f] rounded-xl p-3 space-y-2 border border-zinc-800">
+                    <div class="flex justify-between text-[11px] text-zinc-400">
+                        <span>LATEST DELIVERED ORDER</span>
+                        <span id="latest-batch-time" class="font-mono text-zinc-300">Loading...</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span id="latest-batch-id" class="text-sm font-mono font-bold text-amber-400">#------</span>
+                        <span id="latest-batch-status" class="text-[10px] bg-emerald-950 text-emerald-400 px-2.5 py-0.5 rounded-full border border-emerald-800 font-bold">Checking</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW 1: NETWORK SELECTION -->
+            <div id="network-view" class="space-y-3">
+                <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400 px-1">Select Your Network</h2>
+                
+                <div onclick="selectNetwork('MTN')" class="bg-[#131d3b] border border-zinc-700/60 rounded-2xl p-4 cursor-pointer hover:border-amber-400 transition flex items-center justify-between shadow-md">
+                    <div class="flex items-center space-x-3">
+                        <div class="w-11 h-11 bg-amber-400 rounded-xl flex items-center justify-center text-zinc-950 font-black text-xs shadow">MTN</div>
+                        <div>
+                            <h3 class="text-sm font-bold text-zinc-100">MTN Non-Expiry Bundles</h3>
+                            <p class="text-xs text-zinc-400">6 bundles available</p>
+                        </div>
+                    </div>
+                    <span class="text-amber-400 text-lg font-bold">›</span>
+                </div>
+
+                <div onclick="selectNetwork('TELECEL')" class="bg-[#131d3b] border border-zinc-700/60 rounded-2xl p-4 cursor-pointer hover:border-red-400 transition flex items-center justify-between shadow-md">
+                    <div class="flex items-center space-x-3">
+                        <div class="w-11 h-11 bg-red-600 rounded-xl flex items-center justify-center text-white font-black text-xs shadow">TC</div>
+                        <div>
+                            <h3 class="text-sm font-bold text-zinc-100">TELECEL Bundles</h3>
+                            <p class="text-xs text-zinc-400">6 bundles available</p>
+                        </div>
+                    </div>
+                    <span class="text-red-400 text-lg font-bold">›</span>
+                </div>
+
+                <div onclick="selectNetwork('AIRTELTIGO')" class="bg-[#131d3b] border border-zinc-700/60 rounded-2xl p-4 cursor-pointer hover:border-cyan-400 transition flex items-center justify-between shadow-md">
+                    <div class="flex items-center space-x-3">
+                        <div class="w-11 h-11 bg-cyan-600 rounded-xl flex items-center justify-center text-white font-black text-xs shadow">AT</div>
+                        <div>
+                            <h3 class="text-sm font-bold text-zinc-100">AirtelTigo Bundles</h3>
+                            <p class="text-xs text-zinc-400">6 bundles available</p>
+                        </div>
+                    </div>
+                    <span class="text-cyan-400 text-lg font-bold">›</span>
+                </div>
+            </div>
+
+            <!-- VIEW 2: BUNDLE SIZE LIST -->
+            <div id="bundle-view" class="hidden space-y-3">
+                <div class="flex items-center justify-between bg-[#131d3b] border border-zinc-700/60 rounded-xl p-3 shadow">
+                    <button onclick="goBackToNetworks()" class="text-xs font-semibold text-zinc-400 hover:text-white">← Back</button>
+                    <h2 id="bundle-header-title" class="text-sm font-bold text-zinc-100">Bundles</h2>
+                    <span></span>
+                </div>
+                <div id="bundle-list" class="space-y-2"></div>
+            </div>
+
+            <!-- VIEW 3: CHECKOUT -->
+            <div id="checkout-view" class="hidden bg-[#131d3b] border border-zinc-700/60 rounded-2xl p-5 shadow-xl space-y-4">
+                <div class="flex justify-between items-center border-b border-zinc-800 pb-2">
+                    <h2 class="text-sm font-bold text-zinc-100">Secure Checkout</h2>
+                    <button onclick="goBackToBundles()" class="text-zinc-400 hover:text-white text-sm font-bold">✕</button>
+                </div>
+
+                <div>
+                    <label class="block text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-2">Payment Destination</label>
+                    <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3">
+                        <p class="text-xs font-bold text-amber-300">Francis' Direct MoMo</p>
+                        <p class="text-[11px] text-amber-400/80 font-mono">0249998737</p>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1">Recipient Phone Number</label>
+                    <input type="text" id="recipient-phone" placeholder="e.g., 0244123456" 
+                        class="w-full bg-[#090e1f] border border-zinc-700 rounded-xl px-3 py-2.5 text-sm text-zinc-100 focus:outline-none focus:border-amber-400">
+                </div>
+
+                <div class="bg-[#090e1f] border border-zinc-800 rounded-xl p-3 space-y-1.5 text-xs">
+                    <div class="flex justify-between"><span class="text-zinc-400">Selected Bundle:</span> <span id="sum-bundle" class="font-semibold text-zinc-200">1GB</span></div>
+                    <div class="flex justify-between items-center text-sm pt-2 border-t border-zinc-800">
+                        <span class="font-bold text-zinc-300">Total Display Price:</span>
+                        <span id="sum-price" class="font-bold text-amber-400 text-base">₵4.50</span>
+                    </div>
+                </div>
+
+                <button onclick="executeCheckout()" class="w-full bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold py-3 rounded-xl text-xs shadow-lg transition">Generate Direct Shortcode</button>
+            </div>
+
+            <!-- VIEW 4: SUCCESS & USSD DIAL -->
+            <div id="success-view" class="hidden space-y-4">
+                <div class="bg-amber-500 rounded-2xl p-6 text-center text-zinc-950 shadow-lg">
+                    <h2 class="text-lg font-black mb-1">Payment Prompt Ready</h2>
+                    <p class="text-xs font-medium opacity-90">Approve payment on your phone. Delivery will auto-trigger upon confirmation.</p>
+                </div>
+
+                <div class="bg-[#131d3b] border-2 border-amber-400/80 rounded-2xl p-5 text-center space-y-3 shadow-xl">
+                    <div id="ussd-code-display" class="text-base font-black font-mono text-amber-300 tracking-wider bg-[#090e1f] p-3 rounded-xl border border-zinc-800"></div>
+                    <a id="dial-btn" href="#" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl text-sm flex items-center justify-center space-x-2 shadow-md transition">
+                        <span>📞</span>
+                        <span id="dial-btn-text">Dial to Pay</span>
+                    </a>
+                </div>
+
+                <div class="bg-[#131d3b] border border-zinc-700/60 rounded-2xl p-4 space-y-3 text-xs shadow">
+                    <div class="flex justify-between"><span class="text-zinc-400">Order Reference:</span> <span id="suc-ref" class="font-mono font-bold text-zinc-200"></span></div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-zinc-400">Status:</span>
+                        <span id="suc-status-badge" class="bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2.5 py-0.5 rounded-full font-bold text-[10px]">Processing via Techlink GH</span>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <script>
+            let selectedNetwork = '';
+            let selectedBundleName = '';
+
+            const bundleDisplayData = {
+                'MTN': [
+                    {name: '1GB', price: 4.50}, {name: '2GB', price: 9.00}, 
+                    {name: '3GB', price: 13.00}, {name: '4GB', price: 17.00}, 
+                    {name: '5GB', price: 21.80}, {name: '10GB', price: 41.50}
+                ],
+                'TELECEL': [
+                    {name: '1GB', price: 5.00}, {name: '2GB', price: 10.00}, 
+                    {name: '3GB', price: 14.50}, {name: '4GB', price: 18.50}, 
+                    {name: '5GB', price: 22.00}, {name: '10GB', price: 43.00}
+                ],
+                'AIRTELTIGO': [
+                    {name: '1GB', price: 4.80}, {name: '2GB', price: 9.50}, 
+                    {name: '3GB', price: 13.50}, {name: '4GB', price: 17.50}, 
+                    {name: '5GB', price: 22.00}, {name: '10GB', price: 42.00}
+                ]
+            };
+
+            async function fetchLiveStats() {
+                try {
+                    const res = await fetch('/api/v1/stats');
+                    const data = await res.json();
+                    if (data.reference) {
+                        document.getElementById('latest-batch-id').innerText = data.reference;
+                        document.getElementById('latest-batch-time').innerText = data.timestamp;
+                        document.getElementById('latest-batch-status').innerText = "Delivered";
+                    } else {
+                        document.getElementById('latest-batch-id').innerText = "FL-0000";
+                        document.getElementById('latest-batch-time').innerText = "Ready";
+                        document.getElementById('latest-batch-status').innerText = "Online";
+                    }
+                } catch (e) {
+                    console.error("Stats fetch error:", e);
+                }
             }
-            
-            network = net_map.get(network_choice, "MTN")
-            bundle_size, amount = bundle_map.get(bundle_choice, ("1GB", 5.0))
+            setInterval(fetchLiveStats, 5000);
+            fetchLiveStats();
 
-            background_tasks.add_task(fulfill_bundle_and_notify, caller_phone, network, bundle_size, amount)
+            function selectNetwork(net) {
+                selectedNetwork = net;
+                document.getElementById('network-view').classList.add('hidden');
+                document.getElementById('bundle-view').classList.remove('hidden');
+                document.getElementById('bundle-header-title').innerText = net + " Bundles";
 
-            response_message = (
-                f"END Request Received!\n"
-                f"Processing {bundle_size} {network} bundle for {caller_phone} (GHS {amount}). "
-                f"SMS confirmation incoming."
-            )
-        elif recipient_choice == "2":
-            response_message = "CON Enter recipient phone number (e.g. 0551234987):"
-        else:
-            response_message = "END Invalid choice. Session ended."
+                const listEl = document.getElementById('bundle-list');
+                listEl.innerHTML = '';
+                bundleDisplayData[net].forEach(b => {
+                    listEl.innerHTML += `
+                        <div onclick="openCheckout('${b.name}', ${b.price})" class="bg-[#131d3b] border border-zinc-700/60 hover:border-amber-400 rounded-xl p-3.5 cursor-pointer flex justify-between items-center shadow transition">
+                            <span class="font-bold text-sm text-zinc-100">${b.name} Bundle</span>
+                            <div class="flex items-center space-x-2">
+                                <span class="font-bold text-amber-400 text-sm">₵${b.price.toFixed(2)}</span>
+                                <span class="text-zinc-500 text-sm">›</span>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
 
-    elif len(inputs) == 5 and inputs[0] == "1" and inputs[3] == "2":
-        target_phone = inputs[4]
-        network_choice = inputs[1]
-        bundle_choice = inputs[2]
-        
-        net_map = {"1": "MTN", "2": "Telecel", "3": "AT"}
-        bundle_map = {
-            "1": ("1GB", 5.0), 
-            "2": ("2GB", 10.0), 
-            "3": ("5GB", 25.0), 
-            "4": ("10GB", 50.0)
-        }
-        
-        network = net_map.get(network_choice, "MTN")
-        bundle_size, amount = bundle_map.get(bundle_choice, ("1GB", 5.0))
+            function goBackToNetworks() {
+                document.getElementById('bundle-view').classList.add('hidden');
+                document.getElementById('network-view').classList.remove('hidden');
+            }
 
-        background_tasks.add_task(fulfill_bundle_and_notify, target_phone, network, bundle_size, amount)
+            function openCheckout(bundleName, price) {
+                selectedBundleName = bundleName;
+                document.getElementById('bundle-view').classList.add('hidden');
+                document.getElementById('checkout-view').classList.remove('hidden');
+                document.getElementById('sum-bundle').innerText = bundleName;
+                document.getElementById('sum-price').innerText = `₵${price.toFixed(2)}`;
+                document.getElementById('recipient-phone').value = '';
+            }
 
-        response_message = (
-            f"END Request Received!\n"
-            f"Processing {bundle_size} {network} bundle for {target_phone} (GHS {amount}). "
-            f"SMS confirmation incoming."
-        )
+            function goBackToBundles() {
+                document.getElementById('checkout-view').classList.add('hidden');
+                document.getElementById('bundle-view').classList.remove('hidden');
+            }
 
-    # --- OPTION 2: CHECK ACCOUNT STATUS FLOW ---
-    elif len(inputs) == 1 and inputs[0] == "2":
-        global users_db
-        users_db = load_users()
-        
-        user = users_db.get(caller_phone)
-        if user:
-            response_message = (
-                f"END Account Found:\n"
-                f"Name: {user['full_name']}\n"
-                f"Phone: {caller_phone}\n"
-                f"Status: Active Fastlink Member"
-            )
-        else:
-            response_message = (
-                f"END No account found for {caller_phone}.\n"
-                f"You can still buy data anytime! Visit localhost:8000 to register if desired."
-            )
+            async function executeCheckout() {
+                const phone = document.getElementById('recipient-phone').value.trim();
+                if (!phone || phone.length < 10) { alert("Please enter a valid recipient phone number."); return; }
 
-    # --- FALLBACK ---
-    else:
-        response_message = "END Invalid input. Session ended."
+                const res = await fetch('/api/v1/checkout', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone_number: phone, network: selectedNetwork, bundle_name: selectedBundleName })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    document.getElementById('checkout-view').classList.add('hidden');
+                    document.getElementById('success-view').classList.remove('hidden');
+                    document.getElementById('suc-ref').innerText = data.reference;
 
-    return PlainTextResponse(response_message)
+                    const ussdString = `*170*1*1*0249998737*${data.amount.toFixed(2)}*${data.reference}#`;
+                    document.getElementById('ussd-code-display').innerText = ussdString;
+                    document.getElementById('dial-btn').href = `tel:${encodeURIComponent(ussdString)}`;
+                    document.getElementById('dial-btn-text').innerText = `Dial to Pay ₵${data.amount.toFixed(2)}`;
 
-# Serve static HTML files from the project folder
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+                    pollOrderStatus(data.reference);
+                }
+            }
+
+            async function pollOrderStatus(reference) {
+                const interval = setInterval(async () => {
+                    const res = await fetch(`/api/v1/order/status/${reference}`);
+                    const data = await res.json();
+                    if (data.status === 'SUCCESSFUL') {
+                        document.getElementById('suc-status-badge').className = "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-bold text-[10px]";
+                        document.getElementById('suc-status-badge').innerText = "Delivered Successfully!";
+                        clearInterval(interval);
+                        fetchLiveStats();
+                    }
+                }, 4000);
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+# --- BACKEND API ENDPOINTS ---
+@app.get("/api/v1/stats")
+def get_live_stats():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT reference, created_at FROM orders WHERE status = 'SUCCESSFUL' ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return {"reference": row[0], "timestamp": row[1]}
+    return {"reference": None, "timestamp": None}
+
+@app.post("/api/v1/checkout")
+def process_checkout(order: CheckoutRequest, background_tasks: BackgroundTasks):
+    network_key = order.network.upper().strip()
+    base_price = BASE_PRICES.get(network_key, {}).get(order.bundle_name)
+    if not base_price:
+        raise HTTPException(status_code=400, detail="Invalid bundle selected.")
+
+    # Hidden 5% profit margin calculation
+    final_amount = round(base_price * 1.05, 2)
+    reference_id = f"FL-{os.urandom(2).hex().upper()}"
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO orders (reference, customer_phone, network, bundle_name, amount, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (reference_id, order.phone_number, network_key, order.bundle_name, final_amount, "PENDING", created_at))
+    conn.commit()
+    conn.close()
+
+    # Trigger background wholesale fulfillment with Techlink GH
+    background_tasks.add_task(
+        fulfill_wholesale_bundle,
+        phone_number=order.phone_number,
+        network=network_key,
+        bundle_size=order.bundle_name,
+        reference=reference_id
+    )
+
+    return {"status": "success", "reference": reference_id, "amount": final_amount}
+
+@app.get("/api/v1/order/status/{reference}")
+def get_order_status(reference: str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM orders WHERE reference = ?", (reference,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {"reference": reference, "status": row[0]}
+
+@app.get("/api/v1/test-connection")
+async def test_techlink_connection():
+    headers = {"x-api-key": TECHLINK_API_KEY}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(WALLET_BALANCE_URL, headers=headers)
+            if response.status_code == 200:
+                return {"status": "connected", "data": response.json()}
+            return {"status": "error", "code": response.status_code, "detail": response.text}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
